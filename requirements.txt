@@ -1,0 +1,2 @@
+yfinance      # fetch NIFTY (^NSEI) expiry close for auto-settlement (no broker login needed)
+pandas

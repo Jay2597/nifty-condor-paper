@@ -1,0 +1,42 @@
+name: nifty-condor-settle
+
+# Auto-settlement watcher for the VIX-gated NIFTY monthly iron-condor paper trades.
+# Runs weekly; once an open trade's expiry NIFTY close exists (via yfinance ^NSEI), it settles the
+# condor to realized P&L and commits the updated ledger. No broker login needed (public data).
+
+on:
+  schedule:
+    - cron: "30 4 * * 3"      # every Wednesday 04:30 UTC (post Tue/expiry-week buffer)
+  workflow_dispatch:
+
+concurrency:
+  group: fno-settle
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Settle due trades
+        run: python fno_settle.py
+      - name: Commit ledger if changed
+        run: |
+          git config user.name "fno-settle-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add results/
+          if git diff --staged --quiet; then
+            echo "no change"
+          else
+            git commit -m "settle $(date -u +'%Y-%m-%dT%H:%MZ')"
+            git pull --rebase --autostash
+            git push
+          fi
