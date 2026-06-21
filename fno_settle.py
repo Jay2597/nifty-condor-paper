@@ -1,17 +1,19 @@
-"""fno_settle.py — auto-settle open NIFTY vol-seller paper trades (condor + strangle).
+"""fno_settle.py — auto-settle open index vol-seller paper trades (condor + strangle).
 
 Settlement watcher for results/fno_paper_trades.csv (written by fno_forward_paper.py). Uses public
-NIFTY data (yfinance ^NSEI) — no broker login. Per open trade, if a stop is set (stop_mult>0) it
-walks the daily NIFTY path and BS-reprices the position; if the mark-to-model loss reaches
-stop_mult x credit it closes there (stopped). Otherwise it settles at expiry intrinsic once the
-expiry close exists. Handles both structures: condor (4 legs, loss also wing-capped) and strangle
-(2 legs, naked). BS uses entry-day VIX flat (mild approximation). No-ops until data exists.
+index data (yfinance, per the trade's `index` column: NIFTY->^NSEI, BANKNIFTY->^NSEBANK) — no broker
+login. Per open trade, if a stop is set (stop_mult>0) it walks the daily index path and BS-reprices
+the position; if the mark-to-model loss reaches stop_mult x credit it closes there (stopped).
+Otherwise it settles at expiry intrinsic once the expiry close exists. Handles both structures:
+condor (4 legs, loss also wing-capped) and strangle (2 legs, naked). BS uses entry-day VIX flat
+(mild approximation; BANKNIFTY condor is stopless so its sigma is unused). No-ops until data exists.
 """
 import csv, math, os
 from datetime import datetime, timedelta
 
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 LEDGER = os.path.join(RESULTS, "fno_paper_trades.csv")
+YTICKER = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK"}
 
 
 def _N(x):
@@ -46,12 +48,12 @@ def expiry_payoff(r, ST):
     return p
 
 
-def nifty_history(start, end):
+def index_history(ticker, start, end):
     try:
         import yfinance as yf
     except Exception:
         print("yfinance not installed -> cannot settle"); return {}
-    df = yf.Ticker("^NSEI").history(start=start, end=end)
+    df = yf.Ticker(ticker).history(start=start, end=end)
     if df is None or df.empty:
         return {}
     return {str(ix.date()): float(c) for ix, c in zip(df.index, df["Close"])}
@@ -86,17 +88,18 @@ def main():
     for r in rows:
         if r.get("status") != "open":
             continue
-        E = r["expiry"]
-        hist = nifty_history(r["entry_date"], (_d(E) + timedelta(days=5)).isoformat())
+        E = r["expiry"]; idx = r.get("index", "NIFTY")
+        ticker = YTICKER.get(idx, "^NSEI")
+        hist = index_history(ticker, r["entry_date"], (_d(E) + timedelta(days=5)).isoformat())
         res = settle_trade(r, hist)
         if res is None:
-            print(f"[wait] [{r.get('kind')}] {r['entry_date']}->{E}: data not available yet")
+            print(f"[wait] [{idx} {r.get('kind')}] {r['entry_date']}->{E}: data not available yet")
             continue
         payoff, ST, tag = res
         lot = float(r["lot"])
         r["status"] = "closed"; r["expiry_spot"] = ST
         r["pnl_pts"] = round(payoff, 1); r["pnl_inr"] = round(payoff * lot, 0)
-        print(f"[settle] [{r.get('kind')}] {r['entry_date']}->{E}: exit {ST} {tag} "
+        print(f"[settle] [{idx} {r.get('kind')}] {r['entry_date']}->{E}: exit {ST} {tag} "
               f"{payoff:+.0f}pts (Rs{payoff*lot:+,.0f})")
         changed = True
 
