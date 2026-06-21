@@ -19,7 +19,10 @@ COLS = ["entry_date", "expiry", "kind", "spot", "vix", "lot", "sp", "sc", "lp", 
 BODY, WING, OI_MIN, VOL_MIN = 1.0, 0.5, 500, 1
 MIN_VIX, LOT = 12.0, 65
 MIN_DTE, MAX_DTE, TARGET_DTE = 20, 40, 28
-STRANGLE_STOP = 2.0
+# improved stops from the historical stop sweep: condor 1.5xcredit (Sharpe 1.35->1.75),
+# strangle 2.5xcredit (Sharpe 1.53->1.97). Tight stops whipsaw; these are the better ranges.
+CONDOR_STOP = 1.5
+STRANGLE_STOP = 2.5
 
 
 def read_ledger():
@@ -58,7 +61,7 @@ def main():
                 wing_w = min(c["sp"]["strike"] - c["lp"]["strike"], c["lc"]["strike"] - c["sc"]["strike"])
                 rows.append({**base, "kind": "condor", "sp": c["sp"]["strike"], "sc": c["sc"]["strike"],
                              "lp": c["lp"]["strike"], "lc": c["lc"]["strike"], "credit": round(c["credit"], 1),
-                             "max_loss": round(wing_w - c["credit"], 1), "stop_mult": 0,
+                             "max_loss": round(wing_w - c["credit"], 1), "stop_mult": CONDOR_STOP,
                              "be_low": round(c["sp"]["strike"] - c["credit"], 1),
                              "be_high": round(c["sc"]["strike"] + c["credit"], 1)})
                 print(f"[condor]   SELL {c['sp']['strike']:.0f}PE+{c['sc']['strike']:.0f}CE "

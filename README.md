@@ -3,11 +3,14 @@
 Forward (paper) test of the only F&O edge that survived honest revalidation: **selling NIFTY vol
 only when India VIX ≥ 12**, on **liquid (OI-filtered) strikes**, monthly. Two structures run
 head-to-head:
-- **Iron condor** — shorts ~1.0×EM, wings 0.5×EM (defined risk, no stop). Real-data Sharpe ~1.35,
-  best **return-on-margin** (~100%/yr). The earlier "Sharpe 1.37" via a naive 50-pt grid was a
-  stale-settle artifact.
-- **Short strangle** — shorts ~1.0×EM, no wings, managed by a 2×-credit stop. Real-data Sharpe
-  ~1.53, best **absolute return** (~+Rs174k/3yr/lot) but needs naked SPAN margin.
+- **Iron condor** — shorts ~1.0×EM, wings 0.5×EM, **1.5×-credit stop**. Stop-tuned Sharpe ~1.75
+  (+Rs103k/3yr/lot), best **return-on-margin** (~100%/yr). The earlier "Sharpe 1.37" via a naive
+  50-pt grid was a stale-settle artifact.
+- **Short strangle** — shorts ~1.0×EM, no wings, **2.5×-credit stop**. Stop-tuned Sharpe ~1.97
+  (+Rs209k/3yr/lot), best **absolute return** but needs naked SPAN margin.
+
+Stops were chosen from a historical sweep (tight stops whipsaw; condor ~1.5×, strangle ~2.5× are
+the better ranges). Note: real gaps can blow through a stop — the condor's wings can't be gapped.
 
 Directional trend on the index and condor+trend combinations were tested and rejected (no edge / no
 diversification benefit).
