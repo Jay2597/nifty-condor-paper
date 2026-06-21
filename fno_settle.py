@@ -1,34 +1,75 @@
-"""fno_settle.py — auto-settle open NIFTY condor paper trades.
+"""fno_settle.py — auto-settle open NIFTY vol-seller paper trades (condor + strangle).
 
-Standalone settlement watcher for results/fno_paper_trades.csv (written by fno_forward_paper.py).
-For any OPEN trade whose expiry date has passed, it fetches NIFTY's close on the expiry day from a
-public source (yfinance ^NSEI — no Kite login needed) and settles the condor to realized P&L at
-intrinsic. Designed to run unattended on a schedule (GitHub Actions): it only acts once the expiry
-close exists, otherwise it no-ops.
-
-    python fno_settle.py
+Settlement watcher for results/fno_paper_trades.csv (written by fno_forward_paper.py). Uses public
+NIFTY data (yfinance ^NSEI) — no broker login. Per open trade:
+  * CONDOR   : settle at expiry intrinsic once the expiry close exists (defined risk, no stop).
+  * STRANGLE : walk the daily NIFTY path; if the BS-repriced loss hits stop_mult x credit, close
+               there (stopped); otherwise settle at expiry intrinsic. BS uses entry-day VIX flat
+               (a mild approximation, matching the backtest's stop model closely enough).
+Designed to run unattended weekly (GitHub Actions); no-ops until the needed data exists.
 """
-import csv, os
+import csv, math, os
 from datetime import date, datetime, timedelta
 
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 LEDGER = os.path.join(RESULTS, "fno_paper_trades.csv")
 
 
-def nifty_close_on(day: str):
-    """NIFTY (^NSEI) close on `day` (YYYY-MM-DD) via yfinance; None if unavailable yet."""
+def _N(x):
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def bs(S, K, sigma, t, call=True):
+    if t <= 0 or sigma <= 0:
+        return max(0.0, (S - K) if call else (K - S))
+    d1 = (math.log(S / K) + (sigma * sigma / 2) * t) / (sigma * math.sqrt(t))
+    d2 = d1 - sigma * math.sqrt(t)
+    return (S * _N(d1) - K * _N(d2)) if call else (K * _N(-d2) - S * _N(-d1))
+
+
+def nifty_history(start, end):
+    """Daily ^NSEI closes {YYYY-MM-DD: close} between start and end (inclusive-ish); {} if N/A."""
     try:
         import yfinance as yf
     except Exception:
-        print("yfinance not installed -> cannot settle"); return None
-    d = datetime.strptime(day, "%Y-%m-%d").date()
-    if d > date.today():
-        return None  # expiry hasn't happened yet
-    df = yf.Ticker("^NSEI").history(start=day, end=(d + timedelta(days=4)).isoformat())
+        print("yfinance not installed -> cannot settle"); return {}
+    df = yf.Ticker("^NSEI").history(start=start, end=end)
     if df is None or df.empty:
+        return {}
+    return {str(ix.date()): float(c) for ix, c in zip(df.index, df["Close"])}
+
+
+def settle_strangle(r, hist):
+    """Return (pnl_pts, exit_spot, stopped) or None if not yet resolvable."""
+    E = r["expiry"]; entry = r["entry_date"]
+    cr = float(r["credit"]); Kp, Kc = float(r["sp"]), float(r["sc"])
+    sig = float(r["vix"]) / 100.0; sm = float(r["stop_mult"])
+    Ed = datetime.strptime(E, "%Y-%m-%d").date()
+    path = sorted(d for d in hist if entry < d <= E)
+    # need data through expiry (or at least a stop trigger) before settling
+    have_expiry = any(d >= E for d in hist)
+    for d in path:
+        trem = max(1, (Ed - datetime.strptime(d, "%Y-%m-%d").date()).days) / 365.0
+        S = hist[d]
+        V = bs(S, Kp, sig, trem, call=False) + bs(S, Kc, sig, trem, call=True)
+        if sm > 0 and (V - cr) >= sm * cr:
+            return -(V - cr), round(S, 1), True
+    if not have_expiry:
         return None
-    # first available close on/after the expiry date
-    return float(df["Close"].iloc[0])
+    ST = hist[max(d for d in hist if d <= E)]
+    payoff = cr - max(0.0, Kp - ST) - max(0.0, ST - Kc)
+    return payoff, round(ST, 1), False
+
+
+def settle_condor(r, hist):
+    E = r["expiry"]
+    on = [d for d in hist if d >= E]
+    if not on:
+        return None
+    ST = hist[min(on)]
+    cr = float(r["credit"]); sp, sc, lp, lc = float(r["sp"]), float(r["sc"]), float(r["lp"]), float(r["lc"])
+    payoff = (cr - max(0.0, sp - ST) + max(0.0, lp - ST) - max(0.0, ST - sc) + max(0.0, ST - lc))
+    return payoff, round(ST, 1), False
 
 
 def main():
@@ -37,30 +78,28 @@ def main():
     rows = list(csv.DictReader(open(LEDGER, newline="", encoding="utf-8")))
     cols = list(rows[0].keys()) if rows else []
     changed = False
-
     for r in rows:
         if r.get("status") != "open":
             continue
         E = r["expiry"]
-        ST = nifty_close_on(E)
-        if ST is None:
-            print(f"[wait] {r['entry_date']}->{E}: expiry close not available yet")
+        hist = nifty_history(r["entry_date"], (datetime.strptime(E, "%Y-%m-%d").date()
+                                               + timedelta(days=5)).isoformat())
+        res = settle_strangle(r, hist) if r.get("kind") == "strangle" else settle_condor(r, hist)
+        if res is None:
+            print(f"[wait] [{r.get('kind')}] {r['entry_date']}->{E}: data not available yet")
             continue
-        sp, sc, lp, lc = float(r["sp"]), float(r["sc"]), float(r["lp"]), float(r["lc"])
-        cr = float(r["credit"]); lot = float(r["lot"])
-        payoff = (cr - max(0.0, sp - ST) + max(0.0, lp - ST)
-                  - max(0.0, ST - sc) + max(0.0, ST - lc))
-        r["status"] = "closed"; r["expiry_spot"] = round(ST, 1)
+        payoff, ST, stopped = res
+        lot = float(r["lot"])
+        r["status"] = "closed"; r["expiry_spot"] = ST
         r["pnl_pts"] = round(payoff, 1); r["pnl_inr"] = round(payoff * lot, 0)
-        won = sp <= ST <= sc
-        print(f"[settle] {r['entry_date']}->{E}: NIFTY {ST:.0f} -> "
-              f"{'WIN' if won else 'BREACH'} {payoff:+.0f}pts (Rs{payoff*lot:+,.0f})")
+        tag = "STOPPED" if stopped else ("WIN" if payoff > 0 else "LOSS")
+        print(f"[settle] [{r.get('kind')}] {r['entry_date']}->{E}: exit {ST} {tag} "
+              f"{payoff:+.0f}pts (Rs{payoff*lot:+,.0f})")
         changed = True
 
     if changed:
         with open(LEDGER, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=cols); w.writeheader()
-            w.writerows(rows)
+            w = csv.DictWriter(f, fieldnames=cols); w.writeheader(); w.writerows(rows)
         print("ledger updated")
     else:
         print("no trades settled this run")
